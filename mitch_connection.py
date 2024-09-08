@@ -1,13 +1,10 @@
-import asyncio
-import binascii
-import math
+import asyncio, binascii, math
 from asyncio.tasks import sleep
-import paho.mqtt.client as mqtt  # type: ignore
+import paho.mqtt.client as mqtt # type: ignore
 import json
-import signal
-import sys
+import signal, sys
 from threading import Thread, current_thread
-from bleak import BleakClient, cli  # type: ignore
+from bleak import BleakClient, cli # type: ignore
 
 # Indirizzo BLE del dispositivo Mitch
 mitch_ble_address = "C8:49:E4:54:41:41"
@@ -45,34 +42,9 @@ MODE = 0x05             # Modalità operativa
 FREQUENCY = 0x04        # Frequenza di funzionamento (50Hz)
 LENGTH = 0x03           # Lunghezza dei dati inviati
 
-
 def on_connect(client, userdata, flags, rc):
-    """Callback per la connessione MQTT."""
+    """Funzione callback per la connessione MQTT."""
     print("Connesso al broker con codice {}".format(str(rc)))
-
-
-def start_mqtt_client():
-    """Avvia il client MQTT e si connette al broker."""
-    global mqtt_client
-    mqtt_client = mqtt.Client()
-    mqtt_client.on_connect = on_connect
-    mqtt_client.connect("localhost", 1883, 60)
-    mqtt_client.loop_start()
-    print("Client MQTT avviato e connesso al broker.")
-
-
-def stop_mqtt_client():
-    """Ferma il client MQTT."""
-    mqtt_client.loop_stop()
-    mqtt_client.disconnect()
-    print("Client MQTT disconnesso.")
-
-
-def publish_data(topic, payload):
-    """Pubblica i dati filtrati sul broker MQTT."""
-    mqtt_client.publish(topic, json.dumps(payload))
-    print(f"Dati pubblicati su {topic}: {payload}")
-
 
 async def connect_to_device(address):
     """Gestisce la connessione al dispositivo BLE."""
@@ -89,7 +61,6 @@ async def connect_to_device(address):
         # Configurazione della sensibilità dell'accelerometro
         await configure_accelerometer()
 
-
 async def configure_accelerometer():
     """Configura i parametri di sensibilità dell'accelerometro."""
     pkt = bytearray([0x41, 0x01, 0x04] + [0] * 17)
@@ -104,51 +75,57 @@ async def configure_accelerometer():
         print("Errore {} nel settaggio dei valori di axl".format(error))
         await client.disconnect()
 
+async def read_device_data():
+    """Legge i dati dal dispositivo BLE e li filtra."""
+    global x_filtered, y_filtered, z_filtered
+    while connected:
+        raw_data = await client.read_gatt_char(DATA_CHAR_UUID)
+        # Elaborazione dei dati grezzi
+        x, y, z = process_raw_data(raw_data)
+        x_filtered, y_filtered, z_filtered = filter_data(x, y, z)
 
 def process_raw_data(raw_data):
     """Elabora i dati grezzi dal dispositivo BLE."""
+    # Conversione e elaborazione dei dati
     x = int.from_bytes(raw_data[0:2], byteorder='little')
     y = int.from_bytes(raw_data[2:4], byteorder='little')
     z = int.from_bytes(raw_data[4:6], byteorder='little')
     return x, y, z
 
-
 def filter_data(x, y, z):
     """Applica un filtro ai dati grezzi degli assi."""
-    global x_filtered, y_filtered, z_filtered
     alpha = 0.1
     x_filtered = alpha * x + (1 - alpha) * x_filtered
     y_filtered = alpha * y + (1 - alpha) * y_filtered
     z_filtered = alpha * z + (1 - alpha) * z_filtered
     return x_filtered, y_filtered, z_filtered
 
+def start_mqtt_client():
+    """Avvia il client MQTT e si connette al broker."""
+    global mqtt_client
+    mqtt_client = mqtt.Client()
+    mqtt_client.on_connect = on_connect
+    mqtt_client.connect("localhost", 1883, 60)
 
-async def read_device_data():
-    """Legge i dati dal dispositivo BLE e li filtra."""
-    raw_data = await client.read_gatt_char(DATA_CHAR_UUID)
-    x, y, z = process_raw_data(raw_data)
-    x_filtered, y_filtered, z_filtered = filter_data(x, y, z)
-    return x_filtered, y_filtered, z_filtered
+    mqtt_client.loop_start()
+    print("Client MQTT avviato e connesso al broker.")
 
+def stop_mqtt_client():
+    """Ferma il client MQTT."""
+    mqtt_client.loop_stop()
+    mqtt_client.disconnect()
+    print("Client MQTT disconnesso.")
 
-async def process_and_publish_data():
-    """Elabora i dati dal dispositivo e li pubblica su MQTT."""
-    while connected:
-        x_filtered, y_filtered, z_filtered = await read_device_data()
-        payload = {
-            "x_filtered": x_filtered,
-            "y_filtered": y_filtered,
-            "z_filtered": z_filtered,
-        }
-        publish_data("mitch/data", payload)
-
+def publish_data(topic, payload):
+    """Pubblica i dati filtrati sul broker MQTT."""
+    mqtt_client.publish(topic, json.dumps(payload))
+    print(f"Dati pubblicati su {topic}: {payload}")
 
 def signal_handler(sig, frame):
     """Gestisce i segnali di interruzione e termina il programma."""
     print('Interruzione ricevuta, chiusura in corso...')
     asyncio.run(stop_program())
     sys.exit(0)
-
 
 async def stop_program():
     """Ferma il programma disconnettendo il dispositivo e fermando MQTT."""
@@ -158,15 +135,19 @@ async def stop_program():
         connected = False
     stop_mqtt_client()
 
-
 # Imposta il signal handler per il SIGINT
 signal.signal(signal.SIGINT, signal_handler)
 
-# Inizio della connessione e avvio del ciclo di lettura/pubblicazione dati
-async def main():
+def main():
+    """Funzione principale che avvia il loop asincrono e gestisce la connessione e comunicazione."""
     start_mqtt_client()
-    await connect_to_device(mitch_ble_address)
-    await process_and_publish_data()
+    
+    try:
+        asyncio.run(connect_to_device(mitch_ble_address))
+        asyncio.run(read_device_data())
+    finally:
+        asyncio.run(stop_program())
 
+# Esecuzione principale
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
